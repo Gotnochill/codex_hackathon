@@ -1,0 +1,29 @@
+{
+  "name": "codexmap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CodexMap runtime metadata and deployment config for Render.",
+  "main": "orchestrator.js",
+  "scripts": {
+    "start": "sh -c 'if [ -f server.js ]; then node server.js; elif [ -f orchestrator.js ]; then node orchestrator.js; elif [ -f index.js ]; then node index.js; else echo \"No Node entrypoint found (expected server.js, orchestrator.js, or index.js).\" >&2; exit 1; fi'",
+    "dev": "NODE_ENV=development npm start",
+    "start:render": "sh -c 'PORT=${PORT:-10000}; export PORT; HOST=${HOST:-0.0.0.0}; export HOST; WS_PORT=${WS_PORT:-$PORT}; export WS_PORT; npm start'",
+    "track:init": "node scripts/init-tracking.js",
+    "track:show": "node scripts/show-tracking.js",
+    "live:start": "node scripts/live-session.js",
+    "live:prompt": "node scripts/codex-prompt.js"
+  },
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.27.0",
+    "@babel/traverse": "^7.27.0",
+    "chokidar": "^4.0.3",
+    "simple-git": "^3.27.0",
+    "ws": "^8.18.3"
+  },
+  "optionalDependencies": {
+    "tree-sitter": "^0.25.0"
+  }
+}

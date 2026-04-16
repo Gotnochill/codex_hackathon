@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: codexmap
+    env: node
+    autoDeploy: true
+    buildCommand: npm install
+    startCommand: npm run start:render
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0

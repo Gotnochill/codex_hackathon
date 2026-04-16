@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CodexMap</title>
+  <link rel="stylesheet" href="./styles.css?v=20260416-4" />
+  <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <h1 class="app-title">CodexMap</h1>
+        <div class="drift-cluster">
+          <span id="drift-score-badge" class="pill drift-pill" data-grade="unknown">Drift --</span>
+          <div class="sparkline-block" aria-live="polite">
+            <svg id="drift-sparkline" viewBox="0 0 180 42" role="img" aria-label="Drift trend chart"></svg>
+            <span id="drift-trend-label" class="trend-label">stable</span>
+          </div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <label class="toggle-row" for="autoheal-toggle">
+          <span class="toggle-label">Auto-Heal</span>
+          <input id="autoheal-toggle" type="checkbox" />
+          <span class="toggle-track" aria-hidden="true"></span>
+        </label>
+        <button id="arch-health-meter" class="arch-meter-button" type="button" aria-label="Open architecture health drawer">
+          <svg class="arch-meter-svg" viewBox="0 0 64 64">
+            <circle class="arch-meter-track" cx="32" cy="32" r="26"></circle>
+            <circle id="arch-meter-progress" class="arch-meter-progress" cx="32" cy="32" r="26"></circle>
+          </svg>
+          <div class="arch-meter-text">
+            <span class="arch-meter-label">Arch Health</span>
+            <span id="arch-health-value" class="arch-meter-value">100</span>
+          </div>
+        </button>
+        <div id="connection-status" class="connection-pill disconnected">disconnected</div>
+      </div>
+    </header>
+
+    <div id="drift-warning-banner" class="banner drift-banner is-hidden" role="status" aria-live="polite">
+      <span id="drift-warning-text">⚠️ Drift increasing — context likely weakening. Review red and yellow nodes.</span>
+      <button id="dismiss-drift-warning" class="banner-dismiss" type="button" aria-label="Dismiss drift warning">×</button>
+    </div>
+
+    <div id="arch-warning-banner" class="banner arch-banner is-hidden" role="status" aria-live="polite">
+      <span id="arch-warning-text"></span>
+      <button id="dismiss-arch-warning" class="banner-dismiss" type="button" aria-label="Dismiss architecture warning">×</button>
+    </div>
+
+    <main class="workspace">
+      <section id="graph-container" aria-label="Architecture graph"></section>
+      <aside id="node-feed" class="node-feed" aria-label="Live node feed">
+        <div class="node-feed-header">
+          <span>Live Node Feed</span>
+          <span id="node-feed-count">0</span>
+        </div>
+        <ul id="node-feed-list" class="node-feed-list"></ul>
+      </aside>
+
+      <aside id="node-panel" class="drawer" aria-hidden="true">
+        <header class="drawer-header">
+          <h2>Node Details</h2>
+          <button id="close-node-panel" class="drawer-close" type="button" aria-label="Close node detail panel">×</button>
+        </header>
+        <div class="drawer-body">
+          <div class="panel-field">
+            <span class="panel-label">Path</span>
+            <code id="node-path" class="panel-code">No node selected</code>
+          </div>
+          <div class="panel-grid">
+            <div class="panel-field">
+              <span class="panel-label">Grade</span>
+              <span id="node-grade-badge" class="grade-badge pending">pending</span>
+            </div>
+            <div class="panel-field">
+              <span class="panel-label">Score</span>
+              <span id="node-score">--</span>
+            </div>
+            <div class="panel-field">
+              <span class="panel-label">Type</span>
+              <span id="node-type">--</span>
+            </div>
+            <div class="panel-field">
+              <span class="panel-label">Heal Status</span>
+              <span id="node-heal-status">--</span>
+            </div>
+          </div>
+          <div class="panel-field">
+            <span class="panel-label">Preview</span>
+            <pre id="node-preview" class="node-preview">Select a node in the graph to inspect details.</pre>
+          </div>
+          <div class="panel-actions">
+            <button id="reanchor-btn" type="button" class="secondary-btn">Re-anchor</button>
+            <button id="self-heal-btn" type="button" class="danger-btn is-hidden">Self-Heal</button>
+          </div>
+        </div>
+      </aside>
+
+      <aside id="architecture-drawer" class="drawer wide" aria-hidden="true">
+        <header class="drawer-header">
+          <h2>Architecture Health</h2>
+          <button id="close-architecture-drawer" class="drawer-close" type="button" aria-label="Close architecture drawer">×</button>
+        </header>
+        <div class="drawer-body">
+          <table class="metrics-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Value</th>
+                <th>Threshold</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="architecture-metrics-body"></tbody>
+          </table>
+
+          <section class="warnings-section">
+            <h3>Active Warnings</h3>
+            <ul id="architecture-warning-list" class="warning-list"></ul>
+          </section>
+
+          <button id="heal-all-red-btn" type="button" class="danger-btn">Heal All Red Nodes</button>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="footer-strip">
+      <span id="generation-status">Generation running</span>
+    </footer>
+  </div>
+
+  <script type="module" src="./graph.js?v=20260416-4"></script>
+</body>
+</html>
