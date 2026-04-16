@@ -41,6 +41,65 @@ function scoreToGrade(score) {
   return 'red';
 }
 
+function keywordSet(text) {
+  const stopwords = new Set([
+    'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'your', 'you', 'are',
+    'was', 'were', 'will', 'can', 'not', 'has', 'have', 'had', 'its', 'it', 'a', 'an', 'to',
+    'of', 'on', 'in', 'or', 'by', 'as', 'at', 'be', 'is', 'if', 'but', 'we',
+  ]);
+  return new Set(
+    tokenize(text).filter((token) => token.length > 2 && !stopwords.has(token))
+  );
+}
+
+function promptCoverage(promptText, codeText) {
+  const promptTokens = keywordSet(promptText);
+  if (promptTokens.size === 0) return 0.5;
+  const codeTokens = keywordSet(codeText);
+  let matched = 0;
+  for (const token of promptTokens) {
+    if (codeTokens.has(token)) matched += 1;
+  }
+  return matched / promptTokens.size;
+}
+
+function correctnessHeuristic(codeText) {
+  const code = String(codeText || '');
+  if (!code.trim()) return 0;
+
+  let score = 1;
+
+  const openCurlies = (code.match(/\{/g) || []).length;
+  const closeCurlies = (code.match(/\}/g) || []).length;
+  const openParens = (code.match(/\(/g) || []).length;
+  const closeParens = (code.match(/\)/g) || []).length;
+  const openBrackets = (code.match(/\[/g) || []).length;
+  const closeBrackets = (code.match(/\]/g) || []).length;
+
+  const braceImbalance = Math.abs(openCurlies - closeCurlies) + Math.abs(openParens - closeParens) + Math.abs(openBrackets - closeBrackets);
+  score -= Math.min(0.35, braceImbalance * 0.03);
+
+  const errorPatterns = [
+    /TODO\b/gi,
+    /FIXME\b/gi,
+    /throw new Error\(\s*['"`]not implemented/gi,
+    /console\.log\(\s*['"`]debug/gi,
+    /@@|<<<<|>>>>/g,
+  ];
+
+  let errorHits = 0;
+  for (const pattern of errorPatterns) {
+    errorHits += (code.match(pattern) || []).length;
+  }
+  score -= Math.min(0.3, errorHits * 0.06);
+
+  if (/\b(function|class|const|let|var)\b/.test(code) && !/[;}\n]/.test(code)) {
+    score -= 0.1;
+  }
+
+  return clamp01(score);
+}
+
 function tokenize(text) {
   return String(text || '')
     .toLowerCase()
@@ -196,8 +255,14 @@ function scoreState() {
       const scores = similarityScores(promptEmbedding, nodeEmbeddings);
 
       candidates.forEach((node, index) => {
-        const rawScore = Number(scores[index]);
-        const score = clamp01(Number.isFinite(rawScore) ? rawScore : 0);
+        const semanticScore = clamp01(Number(scores[index]));
+        const coverageScore = promptCoverage(prompt, node.code);
+        const correctnessScore = correctnessHeuristic(node.code);
+        const score = clamp01(
+          (semanticScore * 0.55) +
+          (coverageScore * 0.25) +
+          (correctnessScore * 0.2)
+        );
         const rounded = Number(score.toFixed(4));
         const grade = scoreToGrade(score);
 

@@ -3,13 +3,18 @@ const path = require('path');
 const chokidar = require('chokidar');
 
 const ROOT = path.resolve(__dirname, '..');
-const OUTPUT_DIR = path.join(ROOT, 'output');
-const STATE_PATH = path.join(ROOT, 'shared', 'map-state.json');
-const TRACKING_PATH = path.join(ROOT, 'shared', 'tracking.json');
+const SHARED_DIR = path.join(ROOT, 'shared');
+const STATE_PATH = path.join(SHARED_DIR, 'map-state.json');
+const TRACKING_PATH = path.join(SHARED_DIR, 'tracking.json');
+const GENERATION_STATUS_PATH = path.join(SHARED_DIR, 'generation-status.json');
+const ANALYZE_REQUEST_PATH = path.join(SHARED_DIR, 'analyze-request.json');
 const DEBOUNCE_MS = 300;
-const ACTIVE_SCAN_MS = 3500;
-let trackedDir = OUTPUT_DIR;
-let fileWatcher = null;
+
+let trackedDir = null;
+let debounceTimer = null;
+let rebuildQueuedWhileGenerating = false;
+let pendingForceRebuild = false;
+let lastHandledAnalyzeNonce = 0;
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -31,18 +36,62 @@ function atomicWriteJson(filePath, value) {
   fs.renameSync(tmpPath, filePath);
 }
 
+function ensureSharedFiles() {
+  ensureDir(SHARED_DIR);
+
+  if (!fs.existsSync(STATE_PATH)) {
+    atomicWriteJson(STATE_PATH, { nodes: [], edges: [], driftScore: null, lastUpdated: null });
+  }
+
+  if (!fs.existsSync(TRACKING_PATH)) {
+    atomicWriteJson(TRACKING_PATH, { trackedPath: null, updatedAt: null });
+  }
+
+  if (!fs.existsSync(GENERATION_STATUS_PATH)) {
+    atomicWriteJson(GENERATION_STATUS_PATH, {
+      running: false,
+      done: false,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  if (!fs.existsSync(ANALYZE_REQUEST_PATH)) {
+    atomicWriteJson(ANALYZE_REQUEST_PATH, { nonce: 0, requestedAt: null });
+  }
+}
+
 function resolveTrackedDir() {
   const tracking = safeReadJson(TRACKING_PATH, {});
   const candidate =
-    tracking && typeof tracking.trackedPath === 'string'
-      ? path.resolve(String(tracking.trackedPath))
-      : OUTPUT_DIR;
+    tracking && typeof tracking.trackedPath === 'string' && tracking.trackedPath.trim()
+      ? path.resolve(String(tracking.trackedPath).trim())
+      : null;
 
-  if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
-    return candidate;
+  if (!candidate) {
+    return null;
   }
 
-  return OUTPUT_DIR;
+  try {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+  } catch (_) {
+    return null;
+  }
+
+  return null;
+}
+
+function isGenerationRunning() {
+  const status = safeReadJson(GENERATION_STATUS_PATH, { running: false });
+  return Boolean(status && status.running === true);
+}
+
+function getAnalyzeNonce() {
+  const request = safeReadJson(ANALYZE_REQUEST_PATH, { nonce: 0 });
+  return Number(request.nonce || 0);
 }
 
 function normalizeId(absPath) {
@@ -55,7 +104,13 @@ function listFilesRecursive(dirPath) {
 
   while (stack.length > 0) {
     const current = stack.pop();
-    const entries = fs.readdirSync(current, { withFileTypes: true });
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
 
     for (const entry of entries) {
       if (entry.name.startsWith('.')) continue;
@@ -72,6 +127,7 @@ function listFilesRecursive(dirPath) {
 }
 
 function resolveLocalImport(sourceFile, rawImport) {
+  if (!trackedDir) return null;
   if (!rawImport || !rawImport.startsWith('.')) return null;
 
   const base = path.resolve(path.dirname(sourceFile), rawImport);
@@ -129,18 +185,53 @@ function extractEdges(filePath, sourceId, code) {
   return edges;
 }
 
-function rebuildState() {
-  if (!fs.existsSync(trackedDir)) {
-    ensureDir(trackedDir);
+function resetStateIfNeeded(previousState = null, forceWrite = false) {
+  const previous =
+    previousState ||
+    safeReadJson(STATE_PATH, {
+      nodes: [],
+      edges: [],
+      driftScore: null,
+      lastUpdated: null,
+    });
+
+  const prevNodes = Array.isArray(previous.nodes) ? previous.nodes : [];
+  const prevEdges = Array.isArray(previous.edges) ? previous.edges : [];
+
+  if (!forceWrite && prevNodes.length === 0 && prevEdges.length === 0 && previous.driftScore == null) {
+    return;
   }
 
+  atomicWriteJson(STATE_PATH, {
+    nodes: [],
+    edges: [],
+    driftScore: null,
+    lastUpdated: new Date().toISOString(),
+  });
+}
+
+function rebuildState(forceWrite = false) {
   const previous = safeReadJson(STATE_PATH, {
     nodes: [],
     edges: [],
     driftScore: null,
     lastUpdated: null,
   });
-  const previousNodes = new Map(previous.nodes.map((node) => [node.id, node]));
+
+  if (!trackedDir) {
+    resetStateIfNeeded(previous, forceWrite);
+    return;
+  }
+
+  try {
+    if (!fs.existsSync(trackedDir) || !fs.statSync(trackedDir).isDirectory()) {
+      resetStateIfNeeded(previous, forceWrite);
+      return;
+    }
+  } catch (_) {
+    resetStateIfNeeded(previous, forceWrite);
+    return;
+  }
 
   const files = listFilesRecursive(trackedDir);
   const nodes = [];
@@ -148,18 +239,29 @@ function rebuildState() {
 
   for (const filePath of files) {
     const id = normalizeId(filePath);
-    const stat = fs.statSync(filePath);
-    const code = fs.readFileSync(filePath, 'utf8');
-    const prev = previousNodes.get(id);
-    const isChanged = !prev || prev.code !== code;
+
+    let stat;
+    try {
+      stat = fs.statSync(filePath);
+    } catch (_) {
+      continue;
+    }
+
+    let code = '';
+    try {
+      code = fs.readFileSync(filePath, 'utf8');
+    } catch (_) {
+      // Skip unreadable/binary files; map-state only tracks readable text nodes.
+      continue;
+    }
 
     nodes.push({
       id,
       label: id,
       type: 'file',
       path: id,
-      grade: isChanged ? 'pending' : (prev.grade || 'pending'),
-      score: isChanged ? null : (typeof prev.score === 'number' ? prev.score : null),
+      grade: 'pending',
+      score: null,
       code,
       size: stat.size,
       updatedAt: new Date(stat.mtimeMs).toISOString(),
@@ -179,97 +281,111 @@ function rebuildState() {
     lastUpdated: new Date().toISOString(),
   };
 
-  const prevNodesJson = JSON.stringify(previous.nodes || []);
-  const prevEdgesJson = JSON.stringify(previous.edges || []);
-  const nextNodesJson = JSON.stringify(nextState.nodes);
-  const nextEdgesJson = JSON.stringify(nextState.edges);
+  if (!forceWrite) {
+    const prevNodesJson = JSON.stringify(previous.nodes || []);
+    const prevEdgesJson = JSON.stringify(previous.edges || []);
+    const nextNodesJson = JSON.stringify(nextState.nodes);
+    const nextEdgesJson = JSON.stringify(nextState.edges);
 
-  if (prevNodesJson === nextNodesJson && prevEdgesJson === nextEdgesJson) {
-    return;
+    if (prevNodesJson === nextNodesJson && prevEdgesJson === nextEdgesJson) {
+      return;
+    }
   }
 
   atomicWriteJson(STATE_PATH, nextState);
 }
 
-let debounceTimer = null;
-function scheduleRebuild() {
+function scheduleRebuild(forceWrite = false) {
+  if (forceWrite) {
+    pendingForceRebuild = true;
+  }
+
   if (debounceTimer) {
     clearTimeout(debounceTimer);
   }
+
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
+
+    if (isGenerationRunning()) {
+      rebuildQueuedWhileGenerating = true;
+      return;
+    }
+
+    const shouldForce = pendingForceRebuild;
+    pendingForceRebuild = false;
+
     try {
-      rebuildState();
+      rebuildState(shouldForce);
+      rebuildQueuedWhileGenerating = false;
     } catch (error) {
       console.error('[cartographer] rebuild failed:', error.message);
     }
   }, DEBOUNCE_MS);
 }
 
-ensureDir(path.join(ROOT, 'shared'));
-if (!fs.existsSync(STATE_PATH)) {
-  atomicWriteJson(STATE_PATH, { nodes: [], edges: [], driftScore: null, lastUpdated: null });
-}
-
-ensureDir(OUTPUT_DIR);
-if (!fs.existsSync(TRACKING_PATH)) {
-  atomicWriteJson(TRACKING_PATH, { trackedPath: OUTPUT_DIR, updatedAt: new Date().toISOString() });
-}
-trackedDir = resolveTrackedDir();
-
-function startTrackedWatcher() {
-  if (fileWatcher) {
-    fileWatcher.close();
-  }
-
-  fileWatcher = chokidar.watch(trackedDir, {
-    ignoreInitial: false,
-    persistent: true,
-    awaitWriteFinish: {
-      stabilityThreshold: 200,
-      pollInterval: 50,
-    },
-  });
-
-  fileWatcher
-    .on('add', scheduleRebuild)
-    .on('change', scheduleRebuild)
-    .on('unlink', scheduleRebuild)
-    .on('addDir', scheduleRebuild)
-    .on('unlinkDir', scheduleRebuild)
-    .on('ready', scheduleRebuild)
-    .on('error', (error) => {
-      console.error('[cartographer] watcher error:', error.message);
-    });
-}
-
-startTrackedWatcher();
-
-// Active polling fallback: rebuild every 3.5s so graph updates even if FS events are missed.
-setInterval(() => {
+function handleTrackingChange() {
   const nextTrackedDir = resolveTrackedDir();
+
   if (nextTrackedDir !== trackedDir) {
     trackedDir = nextTrackedDir;
-    console.log(`[cartographer] tracking folder switched to ${trackedDir}`);
-    startTrackedWatcher();
+    console.log(`[cartographer] tracking folder switched to ${trackedDir || '(unset)'}`);
+  }
+
+  // Do not auto-analyze on path change; require explicit Analyze click.
+  resetStateIfNeeded();
+}
+
+function handleAnalyzeRequest() {
+  const nonce = getAnalyzeNonce();
+  if (nonce <= lastHandledAnalyzeNonce) {
     return;
   }
-  scheduleRebuild();
-}, ACTIVE_SCAN_MS);
+
+  lastHandledAnalyzeNonce = nonce;
+  scheduleRebuild(true);
+}
+
+function flushQueuedRebuildIfGenerationFinished() {
+  if (isGenerationRunning()) {
+    return;
+  }
+
+  if (rebuildQueuedWhileGenerating) {
+    scheduleRebuild(true);
+  }
+}
+
+ensureSharedFiles();
+trackedDir = resolveTrackedDir();
+lastHandledAnalyzeNonce = getAnalyzeNonce();
 
 chokidar.watch(TRACKING_PATH, {
-  ignoreInitial: true,
+  ignoreInitial: false,
   awaitWriteFinish: {
     stabilityThreshold: 120,
     pollInterval: 30,
   },
-}).on('change', () => {
-  const nextTrackedDir = resolveTrackedDir();
-  if (nextTrackedDir !== trackedDir) {
-    trackedDir = nextTrackedDir;
-    console.log(`[cartographer] tracking folder switched to ${trackedDir}`);
-    startTrackedWatcher();
-  } else {
-    scheduleRebuild();
-  }
-});
+})
+  .on('add', handleTrackingChange)
+  .on('change', handleTrackingChange);
+
+chokidar.watch(ANALYZE_REQUEST_PATH, {
+  ignoreInitial: false,
+  awaitWriteFinish: {
+    stabilityThreshold: 120,
+    pollInterval: 30,
+  },
+})
+  .on('add', handleAnalyzeRequest)
+  .on('change', handleAnalyzeRequest);
+
+chokidar.watch(GENERATION_STATUS_PATH, {
+  ignoreInitial: false,
+  awaitWriteFinish: {
+    stabilityThreshold: 120,
+    pollInterval: 30,
+  },
+})
+  .on('add', flushQueuedRebuildIfGenerationFinished)
+  .on('change', flushQueuedRebuildIfGenerationFinished);

@@ -7,7 +7,6 @@ const ROOT = path.resolve(__dirname, '..');
 const HISTORY_PATH = path.join(ROOT, 'shared', 'drift-history.json');
 const STATE_PATH = path.join(ROOT, 'shared', 'map-state.json');
 const TRACKING_PATH = path.join(ROOT, 'shared', 'tracking.json');
-const OUTPUT_PATH = path.join(ROOT, 'output');
 const MAX_SNAPSHOTS = 500;
 
 function safeReadJson(filePath, fallback) {
@@ -26,10 +25,10 @@ function atomicWriteJson(filePath, value) {
 
 function getTrackedDir() {
   const tracking = safeReadJson(TRACKING_PATH, {});
-  if (tracking && typeof tracking.trackedPath === 'string') {
-    return path.resolve(String(tracking.trackedPath));
+  if (tracking && typeof tracking.trackedPath === 'string' && tracking.trackedPath.trim()) {
+    return path.resolve(String(tracking.trackedPath).trim());
   }
-  return OUTPUT_PATH;
+  return null;
 }
 
 function ensureHistoryFile() {
@@ -44,8 +43,8 @@ function ensureHistoryFile() {
 
   if (!fs.existsSync(TRACKING_PATH)) {
     atomicWriteJson(TRACKING_PATH, {
-      trackedPath: OUTPUT_PATH,
-      updatedAt: new Date().toISOString(),
+      trackedPath: null,
+      updatedAt: null,
     });
   }
 }
@@ -92,7 +91,19 @@ let lastCommit = null;
 
 setInterval(async () => {
   try {
-    const git = simpleGit(getTrackedDir());
+    const trackedDir = getTrackedDir();
+    let trackedDirAvailable = false;
+    try {
+      trackedDirAvailable = Boolean(trackedDir) && fs.existsSync(trackedDir) && fs.statSync(trackedDir).isDirectory();
+    } catch (_) {
+      trackedDirAvailable = false;
+    }
+
+    if (!trackedDirAvailable) {
+      return;
+    }
+
+    const git = simpleGit(trackedDir);
     const log = await git.log({ maxCount: 1 });
     const hash = log.latest && log.latest.hash;
     if (!hash || hash === lastCommit) {

@@ -4,7 +4,6 @@ const { spawn } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const SHARED_DIR = path.join(ROOT, 'shared');
-const OUTPUT_DIR = path.join(ROOT, 'output');
 const PROMPT_PATH = path.join(SHARED_DIR, 'prompt.txt');
 const GENERATION_STATUS_PATH = path.join(SHARED_DIR, 'generation-status.json');
 const TRACKING_PATH = path.join(SHARED_DIR, 'tracking.json');
@@ -31,11 +30,20 @@ function safeReadJson(filePath, fallback) {
 
 function getTrackedDir() {
   const tracking = safeReadJson(TRACKING_PATH, {});
-  const configured =
-    tracking && typeof tracking.trackedPath === 'string'
-      ? path.resolve(String(tracking.trackedPath))
-      : OUTPUT_DIR;
-  return configured;
+  if (tracking && typeof tracking.trackedPath === 'string' && tracking.trackedPath.trim()) {
+    return path.resolve(String(tracking.trackedPath).trim());
+  }
+  return null;
+}
+
+function writeGenerationStatus({ running, done, startedAt, finishedAt }) {
+  atomicWriteJson(GENERATION_STATUS_PATH, {
+    running: Boolean(running),
+    done: Boolean(done),
+    startedAt: startedAt || null,
+    finishedAt: finishedAt || null,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 function runGenerator() {
@@ -43,26 +51,47 @@ function runGenerator() {
 
   if (!fs.existsSync(TRACKING_PATH)) {
     atomicWriteJson(TRACKING_PATH, {
-      trackedPath: OUTPUT_DIR,
-      updatedAt: new Date().toISOString(),
+      trackedPath: null,
+      updatedAt: null,
     });
   }
 
-  const trackedDir = getTrackedDir();
-  ensureDir(trackedDir);
-
   if (!fs.existsSync(PROMPT_PATH)) {
     fs.writeFileSync(PROMPT_PATH, '');
+  }
+  if (!fs.existsSync(GENERATION_STATUS_PATH)) {
+    writeGenerationStatus({ running: false, done: false, startedAt: null, finishedAt: null });
   }
 
   const prompt = fs.readFileSync(PROMPT_PATH, 'utf8').trim();
   if (!prompt) {
     console.log('[generator] prompt.txt is empty; skipping generation');
-    atomicWriteJson(GENERATION_STATUS_PATH, { done: true, finishedAt: new Date().toISOString() });
+    writeGenerationStatus({ running: false, done: false, startedAt: null, finishedAt: null });
     return;
   }
 
-  atomicWriteJson(GENERATION_STATUS_PATH, { done: false, finishedAt: null });
+  const trackedDir = getTrackedDir();
+  if (!trackedDir) {
+    console.log('[generator] tracking path is not set; skipping generation');
+    writeGenerationStatus({ running: false, done: false, startedAt: null, finishedAt: null });
+    return;
+  }
+
+  let trackedDirAvailable = false;
+  try {
+    trackedDirAvailable = fs.existsSync(trackedDir) && fs.statSync(trackedDir).isDirectory();
+  } catch (_) {
+    trackedDirAvailable = false;
+  }
+
+  if (!trackedDirAvailable) {
+    console.log(`[generator] tracked path is unavailable: ${trackedDir}`);
+    writeGenerationStatus({ running: false, done: false, startedAt: null, finishedAt: null });
+    return;
+  }
+
+  const startedAt = new Date().toISOString();
+  writeGenerationStatus({ running: true, done: false, startedAt, finishedAt: null });
 
   const env = { ...process.env };
   if (!env.OPENAI_API_KEY && env.CODEX_API_KEY) {
@@ -98,12 +127,22 @@ function runGenerator() {
   });
 
   child.on('close', () => {
-    atomicWriteJson(GENERATION_STATUS_PATH, { done: true, finishedAt: new Date().toISOString() });
+    writeGenerationStatus({
+      running: false,
+      done: true,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    });
   });
 
   child.on('error', (error) => {
     console.error('[generator] failed to launch codex:', error.message);
-    atomicWriteJson(GENERATION_STATUS_PATH, { done: true, finishedAt: new Date().toISOString() });
+    writeGenerationStatus({
+      running: false,
+      done: true,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    });
   });
 }
 

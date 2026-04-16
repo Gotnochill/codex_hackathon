@@ -9,7 +9,6 @@ const PROMPT_PATH = path.join(ROOT, 'shared', 'prompt.txt');
 const SETTINGS_PATH = path.join(ROOT, 'shared', 'settings.json');
 const STATE_PATH = path.join(ROOT, 'shared', 'map-state.json');
 const TRACKING_PATH = path.join(ROOT, 'shared', 'tracking.json');
-const DEFAULT_TRACKED_PATH = path.join(ROOT, 'output');
 
 const MAX_ATTEMPTS = 2;
 let healing = false;
@@ -30,10 +29,10 @@ function atomicWriteJson(filePath, value) {
 
 function getTrackedDir() {
   const tracking = safeReadJson(TRACKING_PATH, {});
-  if (tracking && typeof tracking.trackedPath === 'string') {
-    return path.resolve(String(tracking.trackedPath));
+  if (tracking && typeof tracking.trackedPath === 'string' && tracking.trackedPath.trim()) {
+    return path.resolve(String(tracking.trackedPath).trim());
   }
-  return DEFAULT_TRACKED_PATH;
+  return null;
 }
 
 function ensureSharedFiles() {
@@ -51,8 +50,8 @@ function ensureSharedFiles() {
 
   if (!fs.existsSync(TRACKING_PATH)) {
     atomicWriteJson(TRACKING_PATH, {
-      trackedPath: DEFAULT_TRACKED_PATH,
-      updatedAt: new Date().toISOString(),
+      trackedPath: null,
+      updatedAt: null,
     });
   }
 }
@@ -109,9 +108,28 @@ function processQueue() {
   }
 
   codexArgs.push(healPrompt);
+  const trackedDir = getTrackedDir();
+  let trackedDirAvailable = false;
+  try {
+    trackedDirAvailable = Boolean(trackedDir) && fs.existsSync(trackedDir) && fs.statSync(trackedDir).isDirectory();
+  } catch (_) {
+    trackedDirAvailable = false;
+  }
+  if (!trackedDirAvailable) {
+    const queueAfter = safeReadJson(QUEUE_PATH, { queue: [] });
+    const entry = queueAfter.queue.find((item) => item.nodeId === next.nodeId && item.status === 'healing');
+    if (entry) {
+      entry.status = 'failed';
+      entry.completedAt = new Date().toISOString();
+    }
+    atomicWriteJson(QUEUE_PATH, queueAfter);
+    healing = false;
+    setTimeout(processQueue, 500);
+    return;
+  }
 
   const codex = spawn('codex', codexArgs, {
-    cwd: getTrackedDir(),
+    cwd: trackedDir,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
   });

@@ -14,7 +14,7 @@ function atomicWriteJson(filePath, value) {
 }
 
 function printUsageAndExit() {
-  console.error('Usage: npm run live:start -- --track <folder> [--prompt "<prompt>"] [--model <model>] [--port 10000] [--no-open] [--no-restart]');
+  console.error('Usage: npm run live:start -- [--track <folder>] [--prompt "<prompt>"] [--model <model>] [--port 10000] [--no-open] [--no-restart]');
   process.exit(1);
 }
 
@@ -61,18 +61,22 @@ for (let i = 0; i < args.length; i += 1) {
   }
 }
 
-if (!trackedPath) {
-  printUsageAndExit();
-}
-
-const trackedAbs = path.resolve(process.cwd(), trackedPath);
-fs.mkdirSync(trackedAbs, { recursive: true });
 fs.mkdirSync(SHARED_DIR, { recursive: true });
 
-atomicWriteJson(TRACKING_PATH, {
-  trackedPath: trackedAbs,
-  updatedAt: new Date().toISOString(),
-});
+let trackedAbs = null;
+if (trackedPath) {
+  trackedAbs = path.resolve(process.cwd(), trackedPath);
+  fs.mkdirSync(trackedAbs, { recursive: true });
+  atomicWriteJson(TRACKING_PATH, {
+    trackedPath: trackedAbs,
+    updatedAt: new Date().toISOString(),
+  });
+} else if (!fs.existsSync(TRACKING_PATH)) {
+  atomicWriteJson(TRACKING_PATH, {
+    trackedPath: null,
+    updatedAt: null,
+  });
+}
 
 if (prompt) {
   fs.writeFileSync(PROMPT_PATH, `${prompt.trim()}\n`);
@@ -101,7 +105,7 @@ if (!noRestart) {
   }
 }
 
-console.log(`[live:start] tracking: ${trackedAbs}`);
+console.log(`[live:start] tracking: ${trackedAbs || '(unset, set from web UI)'}`);
 console.log(`[live:start] prompt: ${prompt ? 'set' : 'not set (tracker-only mode)'}`);
 console.log(`[live:start] url: http://localhost:${port}`);
 

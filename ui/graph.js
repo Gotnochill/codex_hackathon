@@ -5,6 +5,7 @@ const SERVER_MESSAGE_TYPES = new Set([
   'graph_update',
   'node_grade',
   'full_reset',
+  'generation_status',
   'generation_done',
   'drift_history_update',
   'full_drift_history',
@@ -31,6 +32,7 @@ const ARCH_DEFAULT = {
 const METER_RADIUS = 26;
 const METER_CIRCUMFERENCE = 2 * Math.PI * METER_RADIUS;
 const HTTP_SYNC_MS = 2500;
+const MAX_VISIBLE_GRAPH_NODES = 220;
 
 const appState = {
   socket: null,
@@ -45,6 +47,12 @@ const appState = {
   fallbackMode: false,
   hasLaidOutGraph: false,
   pollingInFlight: false,
+  trackedPath: '',
+  folderBrowserCurrentPath: '',
+  folderBrowserParentPath: null,
+  folderBrowserSelectedPath: '',
+  folderBrowserBusy: false,
+  expandedFolderIds: new Set(),
   virtualNodeIds: new Set(), // tracks synthesised folder node IDs
 };
 
@@ -62,6 +70,23 @@ const dom = {
   archWarningBanner: document.getElementById('arch-warning-banner'),
   archWarningText: document.getElementById('arch-warning-text'),
   dismissArchWarningButton: document.getElementById('dismiss-arch-warning'),
+  trackingForm: document.getElementById('tracking-form'),
+  trackingPathInput: document.getElementById('tracking-path-input'),
+  trackingPathBrowse: document.getElementById('tracking-path-browse'),
+  trackingPathSave: document.getElementById('tracking-path-save'),
+  trackingFooterForm: document.getElementById('tracking-form-footer'),
+  trackingFooterInput: document.getElementById('tracking-path-input-footer'),
+  trackingFooterSave: document.getElementById('tracking-path-save-footer'),
+  trackingPathCurrent: document.getElementById('tracking-path-current'),
+  analyzeButton: document.getElementById('analyze-btn'),
+  resetAllButton: document.getElementById('reset-all-btn'),
+  folderBrowserModal: document.getElementById('folder-browser-modal'),
+  folderBrowserClose: document.getElementById('folder-browser-close'),
+  folderBrowserUp: document.getElementById('folder-browser-up'),
+  folderBrowserCurrent: document.getElementById('folder-browser-current'),
+  folderBrowserList: document.getElementById('folder-browser-list'),
+  folderBrowserCancel: document.getElementById('folder-browser-cancel'),
+  folderBrowserSelect: document.getElementById('folder-browser-select'),
 };
 
 const driftChart = new DriftChart({
@@ -92,6 +117,10 @@ if (dom.archMeterProgress) {
   dom.archMeterProgress.style.strokeDasharray = String(METER_CIRCUMFERENCE);
 }
 
+if (dom.analyzeButton) {
+  dom.analyzeButton.disabled = true;
+}
+
 if (dom.dismissArchWarningButton) {
   dom.dismissArchWarningButton.addEventListener('click', () => {
     appState.dismissedArchBannerKey = appState.lastArchBannerKey;
@@ -111,11 +140,90 @@ if (dom.archHealthMeter) {
   });
 }
 
+if (dom.trackingForm) {
+  dom.trackingForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const nextPath = String(dom.trackingPathInput?.value || '').trim();
+    if (!nextPath) return;
+    updateTrackingPath(nextPath);
+  });
+}
+
+if (dom.trackingPathBrowse) {
+  dom.trackingPathBrowse.addEventListener('click', () => {
+    openFolderBrowser();
+  });
+}
+
+if (dom.trackingFooterForm) {
+  dom.trackingFooterForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const nextPath = String(dom.trackingFooterInput?.value || '').trim();
+    if (!nextPath) return;
+    updateTrackingPath(nextPath);
+  });
+}
+
+if (dom.resetAllButton) {
+  dom.resetAllButton.addEventListener('click', () => {
+    resetAllState();
+  });
+}
+
+if (dom.analyzeButton) {
+  dom.analyzeButton.addEventListener('click', () => {
+    triggerAnalyze();
+  });
+}
+
+if (dom.folderBrowserClose) {
+  dom.folderBrowserClose.addEventListener('click', () => {
+    closeFolderBrowser();
+  });
+}
+
+if (dom.folderBrowserCancel) {
+  dom.folderBrowserCancel.addEventListener('click', () => {
+    closeFolderBrowser();
+  });
+}
+
+if (dom.folderBrowserUp) {
+  dom.folderBrowserUp.addEventListener('click', () => {
+    if (!appState.folderBrowserParentPath || appState.folderBrowserBusy) return;
+    loadFolderBrowserRoot(appState.folderBrowserParentPath);
+  });
+}
+
+if (dom.folderBrowserSelect) {
+  dom.folderBrowserSelect.addEventListener('click', async () => {
+    const selectedPath = String(appState.folderBrowserSelectedPath || '').trim();
+    if (!selectedPath || appState.folderBrowserBusy) return;
+    closeFolderBrowser();
+    await updateTrackingPath(selectedPath);
+  });
+}
+
+if (dom.folderBrowserModal) {
+  dom.folderBrowserModal.addEventListener('click', (event) => {
+    if (event.target === dom.folderBrowserModal) {
+      closeFolderBrowser();
+    }
+  });
+}
+
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!dom.folderBrowserModal || dom.folderBrowserModal.classList.contains('is-hidden')) return;
+  closeFolderBrowser();
+});
+
 appState.cy = initGraph();
 setConnectionStatus('disconnected');
 updateArchHealthUI(ARCH_DEFAULT);
 connectWebSocket();
 startHttpSyncLoop();
+loadTrackingPath();
 
 function initGraph() {
   if (!dom.graphContainer) {
@@ -137,7 +245,7 @@ function initGraph() {
     elements: [],
     layout: { name: 'breadthfirst', directed: true, fit: true, padding: 44 },
     style: [
-      // ── Base file node ──────────────────────────────────────────────────
+      // Base file node
       {
         selector: 'node',
         css: {
@@ -165,7 +273,7 @@ function initGraph() {
           'transition-duration': '300ms',
         },
       },
-      // ── Virtual folder node ──────────────────────────────────────────────
+      // Virtual folder node
       {
         selector: 'node[type = "folder"]',
         css: {
@@ -182,17 +290,17 @@ function initGraph() {
           color: '#c7d2fe',
         },
       },
-      // ── Grade colours ────────────────────────────────────────────────────
+      // Grade colors
       { selector: 'node[grade = "green"]',   css: { 'background-color': '#15803d', 'border-color': '#4ade80', 'border-width': 2 } },
       { selector: 'node[grade = "yellow"]',  css: { 'background-color': '#92400e', 'border-color': '#fcd34d', 'border-width': 2 } },
       { selector: 'node[grade = "red"]',     css: { 'background-color': '#991b1b', 'border-color': '#fca5a5', 'border-width': 2 } },
       { selector: 'node[grade = "pending"]', css: { 'background-color': '#334155', 'border-color': '#64748b' } },
-      // ── Selection ring ───────────────────────────────────────────────────
+      // Selection ring
       {
         selector: 'node:selected',
         css: { 'border-color': '#38bdf8', 'border-width': 4 },
       },
-      // ── Real import edges ────────────────────────────────────────────────
+      // Real import edges
       {
         selector: 'edge',
         css: {
@@ -204,7 +312,7 @@ function initGraph() {
           opacity: 0.75,
         },
       },
-      // ── Virtual hierarchy edges (folder → child) ─────────────────────────
+      // Virtual hierarchy edges (folder -> child)
       {
         selector: 'edge[?virtual]',
         css: {
@@ -217,17 +325,20 @@ function initGraph() {
           opacity: 0.5,
         },
       },
-      // ── Heal-status rings ────────────────────────────────────────────────
+      // Heal-status rings
       { selector: 'node[healStatus = "healing"]', css: { 'border-color': '#a78bfa', 'border-width': 4, 'border-style': 'dashed' } },
       { selector: 'node[healStatus = "done"]',    css: { 'border-color': '#4ade80', 'border-width': 2 } },
       { selector: 'node[healStatus = "failed"]',  css: { 'border-color': '#f87171', 'border-width': 2, 'border-style': 'dotted' } },
+      { selector: '.graph-hidden', css: { display: 'none' } },
     ],
   });
 
   cy.on('tap', 'node', (event) => {
     const nodeId = event.target.id();
-    // Virtual folder nodes don't have panel data – clicking them does nothing
-    if (String(nodeId).startsWith('__dir__')) return;
+    if (String(nodeId).startsWith('__dir__')) {
+      toggleFolderExpansion(nodeId);
+      return;
+    }
     appState.selectedNodeId = nodeId;
     const node = appState.nodes.get(nodeId) || null;
     panelController.setNode(node);
@@ -251,7 +362,9 @@ function connectWebSocket() {
   socket.addEventListener('open', () => {
     appState.reconnectAttempt = 0;
     setConnectionStatus('connected');
-    setGenerationStatus('Generation running');
+    if (!dom.generationStatus?.textContent?.trim()) {
+      setGenerationStatus('Connected');
+    }
   });
 
   socket.addEventListener('message', (event) => {
@@ -315,6 +428,389 @@ async function pollServerState() {
   }
 }
 
+async function loadTrackingPath() {
+  try {
+    const res = await fetch('/api/tracking', { cache: 'no-store' });
+    if (!res.ok) return;
+    const payload = await res.json();
+    updateTrackingPathUi(payload.trackedPath || '');
+  } catch (_) {
+    // no-op
+  }
+}
+
+function openFolderBrowser() {
+  if (!dom.folderBrowserModal) return;
+  dom.folderBrowserModal.classList.remove('is-hidden');
+  const startPath = appState.trackedPath || '';
+  loadFolderBrowserRoot(startPath);
+}
+
+function closeFolderBrowser() {
+  if (!dom.folderBrowserModal) return;
+  dom.folderBrowserModal.classList.add('is-hidden');
+}
+
+function setFolderBrowserBusy(isBusy) {
+  appState.folderBrowserBusy = Boolean(isBusy);
+  if (dom.folderBrowserUp) {
+    dom.folderBrowserUp.disabled = isBusy || !appState.folderBrowserParentPath;
+  }
+  if (dom.folderBrowserSelect) {
+    dom.folderBrowserSelect.disabled = isBusy || !String(appState.folderBrowserSelectedPath || '').trim();
+    dom.folderBrowserSelect.textContent = isBusy ? 'Loading...' : 'Select This Folder';
+  }
+}
+
+function setFolderBrowserSelectedPath(nextPath) {
+  const value = String(nextPath || '').trim();
+  appState.folderBrowserSelectedPath = value;
+
+  if (dom.folderBrowserCurrent) {
+    dom.folderBrowserCurrent.textContent = value || '--';
+    dom.folderBrowserCurrent.title = value || '';
+  }
+
+  if (!dom.folderBrowserList) return;
+  const rows = dom.folderBrowserList.querySelectorAll('.folder-browser-entry');
+  rows.forEach((row) => {
+    const rowPath = String(row.getAttribute('data-path') || '');
+    if (rowPath === value) {
+      row.classList.add('is-selected');
+    } else {
+      row.classList.remove('is-selected');
+    }
+  });
+
+  setFolderBrowserBusy(appState.folderBrowserBusy);
+}
+
+async function fetchFolderListing(requestPath = '') {
+  const query = String(requestPath || '').trim();
+  const url = query
+    ? `/api/folders?path=${encodeURIComponent(query)}`
+    : '/api/folders';
+
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) {
+      setGenerationStatus(payload.error || 'Unable to browse folders');
+      return null;
+    }
+
+    return payload;
+  } catch (_) {
+    setGenerationStatus('Unable to browse folders');
+    return null;
+  }
+}
+
+function createFolderBrowserEntry(dir) {
+  const name = String(dir?.name || '').trim();
+  const pathValue = String(dir?.path || '').trim();
+  if (!name || !pathValue) return null;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'folder-browser-tree-item';
+  wrapper.setAttribute('data-tree-path', pathValue);
+
+  const row = document.createElement('div');
+  row.className = 'folder-browser-entry';
+  row.setAttribute('data-path', pathValue);
+  row.setAttribute('role', 'button');
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'folder-entry-toggle';
+  toggle.textContent = '▸';
+  toggle.setAttribute('aria-label', `Expand ${name}`);
+
+  const label = document.createElement('span');
+  label.className = 'folder-entry-label';
+  label.textContent = `${name}/`;
+  label.title = pathValue;
+
+  row.append(toggle, label);
+  wrapper.appendChild(row);
+
+  const children = document.createElement('div');
+  children.className = 'folder-browser-children is-hidden';
+  wrapper.appendChild(children);
+
+  row.addEventListener('click', (event) => {
+    if (event.target === toggle) return;
+    setFolderBrowserSelectedPath(pathValue);
+  });
+
+  toggle.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (appState.folderBrowserBusy) return;
+
+    const isOpen = wrapper.classList.contains('is-open');
+    if (isOpen) {
+      wrapper.classList.remove('is-open');
+      children.classList.add('is-hidden');
+      toggle.textContent = '▸';
+      return;
+    }
+
+    wrapper.classList.add('is-open');
+    children.classList.remove('is-hidden');
+    toggle.textContent = '▾';
+
+    if (wrapper.getAttribute('data-loaded') === 'true') {
+      return;
+    }
+
+    children.replaceChildren();
+    const loading = document.createElement('div');
+    loading.className = 'folder-browser-empty';
+    loading.textContent = 'Loading...';
+    children.appendChild(loading);
+
+    const payload = await fetchFolderListing(pathValue);
+    children.replaceChildren();
+    if (!payload) {
+      const empty = document.createElement('div');
+      empty.className = 'folder-browser-empty';
+      empty.textContent = 'Unable to load subfolders.';
+      children.appendChild(empty);
+      return;
+    }
+
+    const nested = Array.isArray(payload.directories) ? payload.directories : [];
+    if (nested.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'folder-browser-empty';
+      empty.textContent = 'No subfolders.';
+      children.appendChild(empty);
+    } else {
+      nested.forEach((childDir) => {
+        const childEntry = createFolderBrowserEntry(childDir);
+        if (childEntry) children.appendChild(childEntry);
+      });
+    }
+
+    wrapper.setAttribute('data-loaded', 'true');
+    setFolderBrowserSelectedPath(appState.folderBrowserSelectedPath);
+  });
+
+  return wrapper;
+}
+
+async function loadFolderBrowserRoot(requestPath = '') {
+  if (!dom.folderBrowserList) return;
+
+  setFolderBrowserBusy(true);
+  try {
+    const payload = await fetchFolderListing(requestPath);
+    if (!payload) return;
+
+    appState.folderBrowserCurrentPath = String(payload.currentPath || '').trim();
+    appState.folderBrowserParentPath =
+      typeof payload.parentPath === 'string' && payload.parentPath.trim()
+        ? payload.parentPath.trim()
+        : null;
+
+    dom.folderBrowserList.replaceChildren();
+    const directories = Array.isArray(payload.directories) ? payload.directories : [];
+    if (directories.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'folder-browser-empty';
+      empty.textContent = 'No subfolders in this directory.';
+      dom.folderBrowserList.appendChild(empty);
+    } else {
+      directories.forEach((dir) => {
+        const entry = createFolderBrowserEntry(dir);
+        if (entry) dom.folderBrowserList.appendChild(entry);
+      });
+    }
+
+    setFolderBrowserSelectedPath(appState.folderBrowserCurrentPath);
+  } finally {
+    setFolderBrowserBusy(false);
+  }
+}
+
+async function updateTrackingPath(nextPath) {
+  if (!dom.trackingPathSave && !dom.trackingFooterSave) return;
+  if (dom.trackingPathSave) {
+    dom.trackingPathSave.disabled = true;
+    dom.trackingPathSave.textContent = 'Applying...';
+  }
+  if (dom.trackingFooterSave) {
+    dom.trackingFooterSave.disabled = true;
+    dom.trackingFooterSave.textContent = 'Applying...';
+  }
+  if (dom.trackingPathBrowse) {
+    dom.trackingPathBrowse.disabled = true;
+  }
+
+  try {
+    const res = await fetch('/api/tracking', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: nextPath }),
+    });
+
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) {
+      setGenerationStatus(payload.error || 'Unable to update tracking path');
+      return;
+    }
+
+    updateTrackingPathUi(payload.trackedPath || nextPath);
+    setGenerationStatus('Tracking path updated');
+  } catch (_) {
+    setGenerationStatus('Unable to update tracking path');
+  } finally {
+    if (dom.trackingPathSave) {
+      dom.trackingPathSave.disabled = false;
+      dom.trackingPathSave.textContent = 'Apply';
+    }
+    if (dom.trackingFooterSave) {
+      dom.trackingFooterSave.disabled = false;
+      dom.trackingFooterSave.textContent = 'Apply';
+    }
+    if (dom.trackingPathBrowse) {
+      dom.trackingPathBrowse.disabled = false;
+    }
+  }
+}
+
+async function resetAllState() {
+  if (!dom.resetAllButton) return;
+
+  const confirmed = window.confirm('Reset all graph state, clear history, and stop tracking this folder?');
+  if (!confirmed) return;
+
+  dom.resetAllButton.disabled = true;
+  dom.resetAllButton.textContent = 'Resetting...';
+
+  try {
+    const res = await fetch('/api/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const payload = await res.json().catch(() => ({}));
+
+    if (!res.ok || !payload.ok) {
+      setGenerationStatus(payload.error || 'Unable to reset state');
+      return;
+    }
+
+    if (payload.mapState && typeof payload.mapState === 'object') {
+      applyFullReset({
+        ...payload.mapState,
+        trackedPath: '',
+        autoHeal: false,
+        generation: payload.generation || null,
+      });
+    } else {
+      applyFullReset({
+        nodes: [],
+        edges: [],
+        driftScore: null,
+        lastUpdated: null,
+        trackedPath: '',
+        autoHeal: false,
+        generation: payload.generation || null,
+      });
+    }
+
+    applyDriftHistory(payload.driftHistory || { snapshots: [] });
+    applyArchHealth(payload.archHealth || ARCH_DEFAULT);
+    updateTrackingPathUi('');
+    applyGenerationStatus(payload.generation || { running: false, done: false });
+    setGenerationStatus('Reset complete');
+  } catch (_) {
+    setGenerationStatus('Unable to reset state');
+  } finally {
+    dom.resetAllButton.disabled = false;
+    dom.resetAllButton.textContent = 'Reset';
+  }
+}
+
+async function triggerAnalyze() {
+  if (!dom.analyzeButton) return;
+  if (!String(appState.trackedPath || '').trim()) {
+    setGenerationStatus('Set a tracking path first');
+    return;
+  }
+
+  dom.analyzeButton.disabled = true;
+  dom.analyzeButton.textContent = 'Analyzing...';
+
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) {
+      setGenerationStatus(payload.error || 'Unable to start analyze');
+      return;
+    }
+    setGenerationStatus('Analyze requested');
+  } catch (_) {
+    setGenerationStatus('Unable to start analyze');
+  } finally {
+    dom.analyzeButton.disabled = !String(appState.trackedPath || '').trim();
+    dom.analyzeButton.textContent = 'Analyze';
+  }
+}
+
+function updateTrackingPathUi(nextPath) {
+  const value = String(nextPath || '').trim();
+  const previousPath = appState.trackedPath;
+  appState.trackedPath = value;
+
+  if (dom.trackingPathInput && dom.trackingPathInput.value !== value) {
+    dom.trackingPathInput.value = value;
+  }
+  if (dom.trackingFooterInput && dom.trackingFooterInput.value !== value) {
+    dom.trackingFooterInput.value = value;
+  }
+  if (dom.trackingPathCurrent) {
+    dom.trackingPathCurrent.textContent = `Tracking: ${value || '--'}`;
+  }
+  if (dom.analyzeButton) {
+    dom.analyzeButton.disabled = !value;
+  }
+
+  if (previousPath !== value) {
+    if (appState.cy) {
+      appState.virtualNodeIds.forEach((vid) => {
+        const el = appState.cy.getElementById(vid);
+        if (el.length) el.remove();
+      });
+      appState.cy.edges('[?virtual]').remove();
+
+      const { virtualNodes, virtualEdges } = buildVirtualHierarchy(Array.from(appState.nodes.values()), appState.trackedPath);
+      appState.virtualNodeIds = new Set(virtualNodes.map((node) => node.id));
+      const virtualElements = [
+        ...virtualNodes.map((node) => ({ group: 'nodes', data: node })),
+        ...virtualEdges.map((edge) => ({ group: 'edges', data: edge })),
+      ];
+      if (virtualElements.length > 0) {
+        try {
+          appState.cy.add(virtualElements);
+        } catch (_) {
+          // no-op
+        }
+      }
+      ensureExpandedRootFolders();
+      applyFolderVisibilityLimit();
+      runLayout(appState.hasLaidOutGraph);
+      appState.hasLaidOutGraph = true;
+    } else {
+      renderFallbackGraph();
+    }
+  }
+}
+
 function sendMessage(message) {
   if (!message || !CLIENT_MESSAGE_TYPES.has(message.type)) return;
   if (!appState.socket || appState.socket.readyState !== WebSocket.OPEN) return;
@@ -357,8 +853,11 @@ function handleServerMessage(rawData) {
     case 'full_reset':
       applyFullReset(payload);
       break;
+    case 'generation_status':
+      applyGenerationStatus(payload);
+      break;
     case 'generation_done':
-      setGenerationDone();
+      setGenerationDone(payload);
       break;
     case 'drift_history_update':
     case 'full_drift_history':
@@ -438,6 +937,9 @@ function applyFullReset(rawState) {
   const state = (rawState && typeof rawState === 'object') ? rawState : {};
   const nodeList = Array.isArray(state.nodes) ? state.nodes : [];
   const edgeList = Array.isArray(state.edges) ? state.edges : [];
+  const trackedPath = typeof state.trackedPath === 'string' ? state.trackedPath : '';
+
+  appState.trackedPath = trackedPath;
 
   appState.nodes.clear();
   appState.edges.clear();
@@ -460,7 +962,7 @@ function applyFullReset(rawState) {
 
   // Synthesise virtual folder nodes + hierarchy edges so the graph always
   // shows a parent→child tree even when there are no real import edges.
-  const { virtualNodes, virtualEdges } = buildVirtualHierarchy(Array.from(appState.nodes.values()));
+  const { virtualNodes, virtualEdges } = buildVirtualHierarchy(Array.from(appState.nodes.values()), appState.trackedPath);
   appState.virtualNodeIds = new Set(virtualNodes.map((n) => n.id));
   virtualNodes.forEach((vn) => elements.push({ group: 'nodes', data: vn }));
   virtualEdges.forEach((ve) => elements.push({ group: 'edges', data: ve }));
@@ -478,6 +980,9 @@ function applyFullReset(rawState) {
   }
 
   if (appState.cy) {
+    appState.expandedFolderIds.clear();
+    ensureExpandedRootFolders();
+    applyFolderVisibilityLimit();
     // Always run layout on full reset so nodes are positioned correctly
     runLayout(appState.hasLaidOutGraph);
     appState.hasLaidOutGraph = true;
@@ -496,6 +1001,8 @@ function applyFullReset(rawState) {
   if (typeof state.autoHeal === 'boolean' && dom.autoHealToggle) {
     dom.autoHealToggle.checked = state.autoHeal;
   }
+  updateTrackingPathUi(trackedPath);
+  applyGenerationStatus(state.generation);
 
   if (state.archHealth && typeof state.archHealth === 'object') {
     applyArchHealth(state.archHealth);
@@ -588,7 +1095,7 @@ function applyGraphUpdate(payload) {
     // Remove stale virtual edges
     appState.cy.edges('[?virtual]').remove();
     // Re-inject
-    const { virtualNodes, virtualEdges } = buildVirtualHierarchy(Array.from(appState.nodes.values()));
+    const { virtualNodes, virtualEdges } = buildVirtualHierarchy(Array.from(appState.nodes.values()), appState.trackedPath);
     appState.virtualNodeIds = new Set(virtualNodes.map((n) => n.id));
     const vEls = [
       ...virtualNodes.map((vn) => ({ group: 'nodes', data: vn })),
@@ -597,8 +1104,14 @@ function applyGraphUpdate(payload) {
     if (vEls.length > 0) {
       try { appState.cy.add(vEls); } catch (_) {}
     }
+    ensureExpandedRootFolders();
+    applyFolderVisibilityLimit();
     runLayout(appState.hasLaidOutGraph);
     appState.hasLaidOutGraph = true;
+  }
+  if (appState.cy) {
+    ensureExpandedRootFolders();
+    applyFolderVisibilityLimit();
   }
   if (!appState.cy) renderFallbackGraph();
   renderNodeFeed();
@@ -747,6 +1260,109 @@ function refreshSelectedNode() {
   panelController.setNode(node);
 }
 
+function getRootFolderNodeIds() {
+  if (!appState.cy) return [];
+  return appState.cy
+    .nodes('[type = "folder"]')
+    .filter((node) => node.incomers('edge[?virtual]').length === 0)
+    .map((node) => node.id());
+}
+
+function ensureExpandedRootFolders() {
+  const roots = getRootFolderNodeIds();
+  if (roots.length === 0) return;
+  roots.forEach((id) => {
+    appState.expandedFolderIds.add(id);
+  });
+}
+
+function applyFolderVisibilityLimit() {
+  if (!appState.cy) return;
+
+  const visibleNodeIds = new Set();
+  const visibleEdgeIds = new Set();
+  const rootIds = getRootFolderNodeIds();
+  let hitCap = false;
+
+  const visitFolder = (folderId) => {
+    if (!appState.cy || hitCap) return;
+    if (visibleNodeIds.size >= MAX_VISIBLE_GRAPH_NODES) {
+      hitCap = true;
+      return;
+    }
+
+    visibleNodeIds.add(folderId);
+    if (!appState.expandedFolderIds.has(folderId)) return;
+
+    const folder = appState.cy.getElementById(folderId);
+    if (!folder || folder.length === 0) return;
+
+    const edges = folder.outgoers('edge[?virtual]');
+    edges.forEach((edge) => {
+      if (hitCap) return;
+      const child = edge.target();
+      if (!child || child.length === 0) return;
+
+      if (!visibleNodeIds.has(child.id()) && visibleNodeIds.size >= MAX_VISIBLE_GRAPH_NODES) {
+        hitCap = true;
+        return;
+      }
+
+      visibleEdgeIds.add(edge.id());
+      visibleNodeIds.add(child.id());
+      if (child.data('type') === 'folder') {
+        visitFolder(child.id());
+      }
+    });
+  };
+
+  if (rootIds.length > 0) {
+    rootIds.forEach((rootId) => visitFolder(rootId));
+  } else {
+    // Fallback: no virtual hierarchy, keep all real file nodes visible.
+    appState.cy.nodes().forEach((node) => {
+      if (visibleNodeIds.size < MAX_VISIBLE_GRAPH_NODES) {
+        visibleNodeIds.add(node.id());
+      } else {
+        hitCap = true;
+      }
+    });
+  }
+
+  // Show real edges only when both source/target nodes are visible.
+  appState.cy.edges().forEach((edge) => {
+    if (edge.data('virtual')) return;
+    if (visibleNodeIds.has(edge.data('source')) && visibleNodeIds.has(edge.data('target'))) {
+      visibleEdgeIds.add(edge.id());
+    }
+  });
+
+  appState.cy.nodes().forEach((node) => {
+    if (visibleNodeIds.has(node.id())) node.removeClass('graph-hidden');
+    else node.addClass('graph-hidden');
+  });
+  appState.cy.edges().forEach((edge) => {
+    if (visibleEdgeIds.has(edge.id())) edge.removeClass('graph-hidden');
+    else edge.addClass('graph-hidden');
+  });
+
+  if (hitCap) {
+    setGenerationStatus(`Showing first ${MAX_VISIBLE_GRAPH_NODES} nodes. Expand fewer folders for stability.`);
+  }
+}
+
+function toggleFolderExpansion(folderNodeId) {
+  if (!folderNodeId || !appState.cy) return;
+  if (!appState.expandedFolderIds.has(folderNodeId)) {
+    appState.expandedFolderIds.add(folderNodeId);
+  } else {
+    appState.expandedFolderIds.delete(folderNodeId);
+    ensureExpandedRootFolders();
+  }
+  applyFolderVisibilityLimit();
+  runLayout(true);
+}
+
 function runLayout(animate) {
   if (!appState.cy || appState.cy.nodes().length === 0) return;
   // Root nodes = those with no incoming edges (top of the tree)
@@ -818,16 +1434,36 @@ function looksLikeNode(obj) {
   return Boolean(obj && typeof obj === 'object' && (obj.id || obj.nodeId));
 }
 
+function inferTrackedRootLabel(trackedPath) {
+  const normalized = String(trackedPath || '').trim().replace(/[\\/]+$/, '');
+  if (!normalized) return '';
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || normalized;
+}
+
 /**
  * Synthesise folder nodes + directed edges from file paths so the graph
  * renders as a directory tree even when there are no real import edges.
  * Folder node IDs are prefixed with `__dir__` to distinguish them.
  */
-function buildVirtualHierarchy(nodeList) {
+function buildVirtualHierarchy(nodeList, trackedPath = '') {
   const virtualNodes = [];
   const virtualEdges = [];
   const folderSeen = new Set();
   const edgeSeen = new Set();
+  const trackedRootLabel = inferTrackedRootLabel(trackedPath);
+  const trackedRootId = '__dir__root';
+  const hasTrackedRoot = Boolean(trackedRootLabel);
+
+  if (hasTrackedRoot) {
+    folderSeen.add(trackedRootId);
+    virtualNodes.push({
+      id: trackedRootId,
+      label: trackedRootLabel,
+      type: 'folder',
+      grade: 'folder',
+    });
+  }
 
   for (const node of nodeList) {
     const rawId = String(node.id || '');
@@ -835,7 +1471,7 @@ function buildVirtualHierarchy(nodeList) {
     if (rawId.startsWith('__dir__')) continue;
 
     const parts = rawId.split('/').filter(Boolean);
-    if (parts.length < 2) continue; // root-level file – no folder parent to synthesise
+    if (parts.length === 0) continue;
 
     // Walk every directory depth, creating folder nodes as needed
     for (let depth = 1; depth < parts.length; depth++) {
@@ -851,10 +1487,12 @@ function buildVirtualHierarchy(nodeList) {
           grade: 'folder',
         });
 
-        // Connect this folder to its parent folder
-        if (depth > 1) {
-          const parentPath = parts.slice(0, depth - 1).join('/');
-          const parentId   = `__dir__${parentPath}`;
+        // Connect this folder to its parent folder (or tracked root).
+        if (depth > 1 || hasTrackedRoot) {
+          const parentId =
+            depth === 1
+              ? trackedRootId
+              : `__dir__${parts.slice(0, depth - 1).join('/')}`;
           const eid        = `${parentId}->${folderId}`;
           if (!edgeSeen.has(eid)) {
             edgeSeen.add(eid);
@@ -865,8 +1503,11 @@ function buildVirtualHierarchy(nodeList) {
     }
 
     // Connect the file node to its immediate parent folder
-    const parentPath = parts.slice(0, -1).join('/');
-    const parentId   = `__dir__${parentPath}`;
+    const parentId =
+      parts.length > 1
+        ? `__dir__${parts.slice(0, -1).join('/')}`
+        : (hasTrackedRoot ? trackedRootId : null);
+    if (!parentId) continue;
     const eid        = `${parentId}->${rawId}`;
     if (!edgeSeen.has(eid)) {
       edgeSeen.add(eid);
@@ -892,8 +1533,33 @@ function setDriftScoreBadge(score) {
   else dom.driftScoreBadge.dataset.grade = 'low';
 }
 
-function setGenerationDone() {
-  const now = new Date();
+function applyGenerationStatus(payload) {
+  const status = (payload && typeof payload === 'object') ? payload : {};
+  const running = Boolean(status.running);
+  const done = Boolean(status.done);
+  const finishedAt = status.finishedAt ? new Date(status.finishedAt) : null;
+
+  if (running) {
+    setGenerationStatus('Generation running');
+    return;
+  }
+
+  if (done && finishedAt && !Number.isNaN(finishedAt.getTime())) {
+    setGenerationStatus(`Generation done (${finishedAt.toLocaleTimeString()})`);
+    return;
+  }
+
+  if (done) {
+    setGenerationStatus('Generation done');
+    return;
+  }
+
+  setGenerationStatus('Idle');
+}
+
+function setGenerationDone(payload) {
+  const finishedAt = payload && payload.finishedAt ? new Date(payload.finishedAt) : new Date();
+  const now = Number.isNaN(finishedAt.getTime()) ? new Date() : finishedAt;
   setGenerationStatus(`Generation done (${now.toLocaleTimeString()})`);
 }
 
@@ -959,11 +1625,18 @@ function renderFallbackGraph() {
 
 function renderNodeFeed() {
   if (!dom.nodeFeedCount || !dom.nodeFeedList) return;
-  const nodes = Array.from(appState.nodes.values()).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  dom.nodeFeedCount.textContent = String(nodes.length);
+  let nodes = Array.from(appState.nodes.values()).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  if (appState.cy) {
+    const visibleIds = new Set(appState.cy.nodes(':visible').map((node) => node.id()));
+    nodes = nodes.filter((node) => visibleIds.has(node.id));
+  }
+  const limited = nodes.slice(0, MAX_VISIBLE_GRAPH_NODES);
+  dom.nodeFeedCount.textContent = nodes.length > limited.length
+    ? `${limited.length}/${nodes.length}`
+    : String(limited.length);
   dom.nodeFeedList.replaceChildren();
 
-  if (nodes.length === 0) {
+  if (limited.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'node-feed-item grade-pending';
     empty.textContent = 'No nodes yet';
@@ -971,7 +1644,7 @@ function renderNodeFeed() {
     return;
   }
 
-  nodes.slice(0, 200).forEach((node) => {
+  limited.forEach((node) => {
     const grade = ['green', 'yellow', 'red', 'pending'].includes(String(node.grade)) ? String(node.grade) : 'pending';
     const item = document.createElement('li');
     item.className = `node-feed-item grade-${grade}`;

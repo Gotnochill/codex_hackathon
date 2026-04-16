@@ -12,7 +12,12 @@ const DRIFT_HISTORY_PATH = path.join(SHARED_DIR, 'drift-history.json');
 const ARCH_HEALTH_PATH = path.join(SHARED_DIR, 'arch-health.json');
 const HEAL_QUEUE_PATH = path.join(SHARED_DIR, 'heal-queue.json');
 const SETTINGS_PATH = path.join(SHARED_DIR, 'settings.json');
+const PROMPT_PATH = path.join(SHARED_DIR, 'prompt.txt');
 const GENERATION_STATUS_PATH = path.join(SHARED_DIR, 'generation-status.json');
+const TRACKING_PATH = path.join(SHARED_DIR, 'tracking.json');
+const ANALYZE_REQUEST_PATH = path.join(SHARED_DIR, 'analyze-request.json');
+const DEFAULT_BROWSE_ROOT = path.parse(ROOT).root;
+const BROWSE_ROOT = path.resolve(process.env.CODEXMAP_BROWSE_ROOT || DEFAULT_BROWSE_ROOT);
 
 const PORT = Number(process.env.PORT || process.env.WS_PORT || 4242);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -50,40 +55,241 @@ function broadcast(type, payload) {
   }
 }
 
+function emptyMapState() {
+  return { nodes: [], edges: [], driftScore: null, lastUpdated: null };
+}
+
+function emptyDriftHistory() {
+  return { snapshots: [] };
+}
+
+function emptyArchHealth() {
+  return {
+    redNodeRatio: 0,
+    depComplexity: 0,
+    maxCyclomatic: 0,
+    collapseScore: 0,
+    warnings: [],
+    destabilizing: false,
+    lastUpdated: null,
+  };
+}
+
+function emptyQueue() {
+  return { queue: [] };
+}
+
+function defaultSettings() {
+  return { autoHeal: false };
+}
+
+function idleGenerationStatus() {
+  return {
+    running: false,
+    done: false,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function unsetTrackingPayload() {
+  return { trackedPath: null, updatedAt: null };
+}
+
+function emptyAnalyzeRequest() {
+  return { nonce: 0, requestedAt: null };
+}
+
 function ensureSharedFiles() {
   ensureDir(SHARED_DIR);
 
   if (!fs.existsSync(MAP_STATE_PATH)) {
-    atomicWriteJson(MAP_STATE_PATH, { nodes: [], edges: [], driftScore: null, lastUpdated: null });
+    atomicWriteJson(MAP_STATE_PATH, emptyMapState());
   }
 
   if (!fs.existsSync(DRIFT_HISTORY_PATH)) {
-    atomicWriteJson(DRIFT_HISTORY_PATH, { snapshots: [] });
+    atomicWriteJson(DRIFT_HISTORY_PATH, emptyDriftHistory());
   }
 
   if (!fs.existsSync(ARCH_HEALTH_PATH)) {
-    atomicWriteJson(ARCH_HEALTH_PATH, {
-      redNodeRatio: 0,
-      depComplexity: 0,
-      maxCyclomatic: 0,
-      collapseScore: 0,
-      warnings: [],
-      destabilizing: false,
-      lastUpdated: null,
-    });
+    atomicWriteJson(ARCH_HEALTH_PATH, emptyArchHealth());
   }
 
   if (!fs.existsSync(HEAL_QUEUE_PATH)) {
-    atomicWriteJson(HEAL_QUEUE_PATH, { queue: [] });
+    atomicWriteJson(HEAL_QUEUE_PATH, emptyQueue());
   }
 
   if (!fs.existsSync(SETTINGS_PATH)) {
-    atomicWriteJson(SETTINGS_PATH, { autoHeal: false });
+    atomicWriteJson(SETTINGS_PATH, defaultSettings());
+  }
+
+  if (!fs.existsSync(PROMPT_PATH)) {
+    fs.writeFileSync(PROMPT_PATH, '');
   }
 
   if (!fs.existsSync(GENERATION_STATUS_PATH)) {
-    atomicWriteJson(GENERATION_STATUS_PATH, { done: false, finishedAt: null });
+    atomicWriteJson(GENERATION_STATUS_PATH, idleGenerationStatus());
   }
+
+  if (!fs.existsSync(TRACKING_PATH)) {
+    atomicWriteJson(TRACKING_PATH, unsetTrackingPayload());
+  }
+
+  if (!fs.existsSync(ANALYZE_REQUEST_PATH)) {
+    atomicWriteJson(ANALYZE_REQUEST_PATH, emptyAnalyzeRequest());
+  }
+}
+
+function resolveTrackingPayload() {
+  const tracking = safeReadJson(TRACKING_PATH, { trackedPath: null, updatedAt: null });
+  const trackedPath =
+    tracking && typeof tracking.trackedPath === 'string' && tracking.trackedPath.trim()
+      ? path.resolve(String(tracking.trackedPath).trim())
+      : null;
+  return {
+    trackedPath,
+    updatedAt: tracking.updatedAt || null,
+  };
+}
+
+function resolveGenerationPayload() {
+  const status = safeReadJson(GENERATION_STATUS_PATH, {
+    running: false,
+    done: false,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: null,
+  });
+
+  return {
+    running: Boolean(status.running),
+    done: Boolean(status.done),
+    startedAt: status.startedAt || null,
+    finishedAt: status.finishedAt || null,
+    updatedAt: status.updatedAt || null,
+  };
+}
+
+function isPathInside(basePath, targetPath) {
+  const relative = path.relative(basePath, targetPath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function resolveBrowsePath(rawPath) {
+  let nextPath = null;
+  if (typeof rawPath === 'string' && rawPath.trim()) {
+    nextPath = path.resolve(rawPath.trim());
+  } else {
+    const tracked = resolveTrackingPayload().trackedPath;
+    nextPath = tracked || BROWSE_ROOT;
+  }
+
+  if (!isPathInside(BROWSE_ROOT, nextPath)) {
+    nextPath = BROWSE_ROOT;
+  }
+
+  return nextPath;
+}
+
+function listBrowseDirectories(rawPath) {
+  const currentPath = resolveBrowsePath(rawPath);
+
+  if (!fs.existsSync(currentPath)) {
+    throw new Error('Folder does not exist');
+  }
+
+  const stats = fs.statSync(currentPath);
+  if (!stats.isDirectory()) {
+    throw new Error('Path is not a directory');
+  }
+
+  const directories = fs.readdirSync(currentPath, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const fullPath = path.join(currentPath, entry.name);
+      return {
+        name: entry.name,
+        path: fullPath,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const parentCandidate = path.dirname(currentPath);
+  const parentPath =
+    currentPath === BROWSE_ROOT
+      ? null
+      : (isPathInside(BROWSE_ROOT, parentCandidate) ? parentCandidate : BROWSE_ROOT);
+
+  return {
+    rootPath: BROWSE_ROOT,
+    currentPath,
+    parentPath,
+    directories,
+  };
+}
+
+function performReset() {
+  const mapState = {
+    ...emptyMapState(),
+    lastUpdated: new Date().toISOString(),
+  };
+  const driftHistory = emptyDriftHistory();
+  const archHealth = {
+    ...emptyArchHealth(),
+    lastUpdated: new Date().toISOString(),
+  };
+  const queue = emptyQueue();
+  const settings = defaultSettings();
+  const generation = idleGenerationStatus();
+  const tracking = unsetTrackingPayload();
+  const analyzeRequest = emptyAnalyzeRequest();
+
+  atomicWriteJson(MAP_STATE_PATH, mapState);
+  atomicWriteJson(DRIFT_HISTORY_PATH, driftHistory);
+  atomicWriteJson(ARCH_HEALTH_PATH, archHealth);
+  atomicWriteJson(HEAL_QUEUE_PATH, queue);
+  atomicWriteJson(SETTINGS_PATH, settings);
+  atomicWriteJson(GENERATION_STATUS_PATH, generation);
+  atomicWriteJson(TRACKING_PATH, tracking);
+  atomicWriteJson(ANALYZE_REQUEST_PATH, analyzeRequest);
+  fs.writeFileSync(PROMPT_PATH, '');
+
+  return {
+    mapState,
+    driftHistory,
+    archHealth,
+    queue,
+    settings,
+    generation,
+    tracking,
+    analyzeRequest,
+  };
+}
+
+function triggerAnalyze() {
+  const current = safeReadJson(ANALYZE_REQUEST_PATH, emptyAnalyzeRequest());
+  const nonce = Number(current.nonce || 0) + 1;
+  const payload = {
+    nonce,
+    requestedAt: new Date().toISOString(),
+  };
+  atomicWriteJson(ANALYZE_REQUEST_PATH, payload);
+  return payload;
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += String(chunk);
+      if (body.length > 512 * 1024) {
+        reject(new Error('Request body too large'));
+      }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
 }
 
 function contentTypeFor(filePath) {
@@ -100,16 +306,162 @@ function contentTypeFor(filePath) {
 }
 
 function serveUi(req, res) {
-  const rawPath = String((req && req.url) || '/').split('?')[0] || '/';
+  const rawUrl = String((req && req.url) || '/');
+  const [urlPath, queryString = ''] = rawUrl.split('?');
+  const rawPath = urlPath || '/';
+  const query = new URLSearchParams(queryString);
 
   if (rawPath === '/api/map-state') {
     const payload = safeReadJson(MAP_STATE_PATH, { nodes: [], edges: [], driftScore: null, lastUpdated: null });
     const settings = safeReadJson(SETTINGS_PATH, { autoHeal: false });
+    const tracking = resolveTrackingPayload();
+    const generation = resolveGenerationPayload();
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
     });
-    res.end(JSON.stringify({ ...payload, autoHeal: Boolean(settings.autoHeal) }));
+    res.end(
+      JSON.stringify({
+        ...payload,
+        autoHeal: Boolean(settings.autoHeal),
+        trackedPath: tracking.trackedPath,
+        generation,
+      })
+    );
+    return;
+  }
+
+  if (rawPath === '/api/tracking' && req.method === 'GET') {
+    const tracking = resolveTrackingPayload();
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    res.end(JSON.stringify(tracking));
+    return;
+  }
+
+  if (rawPath === '/api/tracking' && req.method === 'POST') {
+    readRequestBody(req)
+      .then((body) => {
+        let data = {};
+        try {
+          data = JSON.parse(body || '{}');
+        } catch (_) {
+          res.writeHead(400, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          });
+          res.end(JSON.stringify({ ok: false, error: 'Invalid JSON payload' }));
+          return;
+        }
+
+        const rawInput = typeof data.path === 'string' ? data.path.trim() : '';
+        if (!rawInput) {
+          res.writeHead(400, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          });
+          res.end(JSON.stringify({ ok: false, error: 'Path is required' }));
+          return;
+        }
+
+        const nextPath = path.resolve(rawInput);
+        try {
+          fs.mkdirSync(nextPath, { recursive: true });
+        } catch (error) {
+          res.writeHead(400, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          });
+          res.end(JSON.stringify({ ok: false, error: `Unable to access path: ${error.message}` }));
+          return;
+        }
+
+        const payload = {
+          trackedPath: nextPath,
+          updatedAt: new Date().toISOString(),
+        };
+        atomicWriteJson(TRACKING_PATH, payload);
+
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify({ ok: true, ...payload }));
+      })
+      .catch((error) => {
+        res.writeHead(500, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify({ ok: false, error: error.message || 'Failed to update tracking path' }));
+      });
+    return;
+  }
+
+  if (rawPath === '/api/folders' && req.method === 'GET') {
+    try {
+      const requestedPath = query.get('path');
+      const payload = listBrowseDirectories(requestedPath);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: true, ...payload }));
+    } catch (error) {
+      res.writeHead(400, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: false, error: error.message || 'Unable to browse folder' }));
+    }
+    return;
+  }
+
+  if (rawPath === '/api/reset' && req.method === 'POST') {
+    try {
+      const payload = performReset();
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: true, ...payload }));
+    } catch (error) {
+      res.writeHead(500, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: false, error: error.message || 'Failed to reset state' }));
+    }
+    return;
+  }
+
+  if (rawPath === '/api/analyze' && req.method === 'POST') {
+    const tracking = resolveTrackingPayload();
+    if (!tracking.trackedPath) {
+      res.writeHead(400, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: false, error: 'Tracking path is not set' }));
+      return;
+    }
+
+    try {
+      const analyzeRequest = triggerAnalyze();
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: true, analyzeRequest }));
+    } catch (error) {
+      res.writeHead(500, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: false, error: error.message || 'Failed to trigger analyze' }));
+    }
     return;
   }
 
@@ -243,7 +595,17 @@ function computeGraphDelta(prevState, nextState) {
     }
   }
 
-  return { nodes: changedNodes, edges: changedEdges };
+  const removedNodeIds = [];
+  for (const id of prevNodes.keys()) {
+    if (!nextNodes.has(id)) removedNodeIds.push(id);
+  }
+
+  const removedEdgeIds = [];
+  for (const id of prevEdges.keys()) {
+    if (!nextEdges.has(id)) removedEdgeIds.push(id);
+  }
+
+  return { nodes: changedNodes, edges: changedEdges, removedNodeIds, removedEdgeIds };
 }
 
 function emitNodeGradeUpdates(prevState, nextState) {
@@ -306,10 +668,15 @@ server.listen(PORT, HOST, () => {
 wss.on('connection', (ws) => {
   const fullState = safeReadJson(MAP_STATE_PATH, { nodes: [], edges: [], driftScore: null, lastUpdated: null });
   const settings = safeReadJson(SETTINGS_PATH, { autoHeal: false });
+  const tracking = resolveTrackingPayload();
+  const generation = resolveGenerationPayload();
   send(ws, 'full_reset', {
     ...fullState,
     autoHeal: Boolean(settings.autoHeal),
+    trackedPath: tracking.trackedPath,
+    generation,
   });
+  send(ws, 'generation_status', generation);
 
   const driftHistory = safeReadJson(DRIFT_HISTORY_PATH, { snapshots: [] });
   send(ws, 'full_drift_history', driftHistory);
@@ -356,7 +723,9 @@ wss.on('connection', (ws) => {
 
 let lastState = safeReadJson(MAP_STATE_PATH, { nodes: [], edges: [], driftScore: null, lastUpdated: null });
 let lastQueue = safeReadJson(HEAL_QUEUE_PATH, { queue: [] });
-let lastGenerationDone = false;
+const initialGenerationStatus = resolveGenerationPayload();
+let lastGenerationDone = initialGenerationStatus.done;
+let lastGenerationRunning = initialGenerationStatus.running;
 
 const watcher = chokidar.watch(
   [MAP_STATE_PATH, DRIFT_HISTORY_PATH, ARCH_HEALTH_PATH, HEAL_QUEUE_PATH, GENERATION_STATUS_PATH],
@@ -369,12 +738,17 @@ const watcher = chokidar.watch(
   }
 );
 
-watcher.on('change', (changedPath) => {
+function handleSharedStateChange(changedPath) {
   if (changedPath === MAP_STATE_PATH) {
     const nextState = safeReadJson(MAP_STATE_PATH, { nodes: [], edges: [], driftScore: null, lastUpdated: null });
     const delta = computeGraphDelta(lastState, nextState);
 
-    if ((delta.nodes && delta.nodes.length > 0) || (delta.edges && delta.edges.length > 0)) {
+    if (
+      (delta.nodes && delta.nodes.length > 0) ||
+      (delta.edges && delta.edges.length > 0) ||
+      (delta.removedNodeIds && delta.removedNodeIds.length > 0) ||
+      (delta.removedEdgeIds && delta.removedEdgeIds.length > 0)
+    ) {
       broadcast('graph_update', delta);
     }
 
@@ -422,13 +796,21 @@ watcher.on('change', (changedPath) => {
   }
 
   if (changedPath === GENERATION_STATUS_PATH) {
-    const status = safeReadJson(GENERATION_STATUS_PATH, { done: false, finishedAt: null });
+    const status = resolveGenerationPayload();
+    if (status.running !== lastGenerationRunning) {
+      broadcast('generation_status', status);
+    }
     if (status.done && !lastGenerationDone) {
       broadcast('generation_done', { finishedAt: status.finishedAt || new Date().toISOString() });
     }
     lastGenerationDone = Boolean(status.done);
+    lastGenerationRunning = Boolean(status.running);
   }
-});
+}
+
+watcher.on('add', handleSharedStateChange);
+watcher.on('change', handleSharedStateChange);
+watcher.on('unlink', handleSharedStateChange);
 
 watcher.on('error', (error) => {
   console.error('[broadcaster] watcher error:', error.message);

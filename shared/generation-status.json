@@ -1,4 +1,7 @@
 {
-  "done": true,
-  "finishedAt": "2026-04-16T08:23:30.287Z"
+  "running": false,
+  "done": false,
+  "startedAt": null,
+  "finishedAt": null,
+  "updatedAt": "2026-04-16T10:47:20.341Z"
 }

@@ -11,7 +11,8 @@
     "track:init": "node scripts/init-tracking.js",
     "track:show": "node scripts/show-tracking.js",
     "live:start": "node scripts/live-session.js",
-    "live:prompt": "node scripts/codex-prompt.js"
+    "live:prompt": "node scripts/codex-prompt.js",
+    "analyze:open": "node scripts/restart-open-track.js"
   },
   "engines": {
     "node": ">=20 <21"

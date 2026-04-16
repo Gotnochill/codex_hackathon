@@ -11,7 +11,8 @@ const HEAL_QUEUE_PATH = path.join(SHARED_DIR, 'heal-queue.json');
 const ARCH_HEALTH_PATH = path.join(SHARED_DIR, 'arch-health.json');
 const SETTINGS_PATH = path.join(SHARED_DIR, 'settings.json');
 const TRACKING_PATH = path.join(SHARED_DIR, 'tracking.json');
-const DEFAULT_TRACKED_PATH = path.join(ROOT, 'output');
+const GENERATION_STATUS_PATH = path.join(SHARED_DIR, 'generation-status.json');
+const ANALYZE_REQUEST_PATH = path.join(SHARED_DIR, 'analyze-request.json');
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -54,14 +55,28 @@ function initializeSharedState() {
   );
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify({ autoHeal: false }, null, 2));
 
-  if (!fs.existsSync(DEFAULT_TRACKED_PATH)) {
-    fs.mkdirSync(DEFAULT_TRACKED_PATH, { recursive: true });
-  }
-
   if (!fs.existsSync(TRACKING_PATH)) {
     fs.writeFileSync(
       TRACKING_PATH,
-      JSON.stringify({ trackedPath: DEFAULT_TRACKED_PATH, updatedAt: new Date().toISOString() }, null, 2)
+      JSON.stringify({ trackedPath: null, updatedAt: null }, null, 2)
+    );
+  }
+
+  if (!fs.existsSync(GENERATION_STATUS_PATH)) {
+    fs.writeFileSync(
+      GENERATION_STATUS_PATH,
+      JSON.stringify(
+        { running: false, done: false, startedAt: null, finishedAt: null, updatedAt: new Date().toISOString() },
+        null,
+        2
+      )
+    );
+  }
+
+  if (!fs.existsSync(ANALYZE_REQUEST_PATH)) {
+    fs.writeFileSync(
+      ANALYZE_REQUEST_PATH,
+      JSON.stringify({ nonce: 0, requestedAt: null }, null, 2)
     );
   }
 }

@@ -4,7 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CodexMap</title>
-  <link rel="stylesheet" href="./styles.css?v=20260416-9" />
+  <link rel="stylesheet" href="./styles.css?v=20260416-13" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
 </head>
 <body>
@@ -39,6 +42,15 @@
         <div id="connection-status" class="connection-pill disconnected">disconnected</div>
       </div>
     </header>
+    <section class="tracking-strip" aria-label="Tracking configuration">
+      <form id="tracking-form" class="track-form" autocomplete="off">
+        <label for="tracking-path-input" class="track-label">Enter path</label>
+        <input id="tracking-path-input" class="track-input" type="text" placeholder="/path/to/your/project" />
+        <button id="tracking-path-browse" class="track-browse-btn" type="button">Browse</button>
+        <button id="tracking-path-save" class="track-save-btn" type="submit">Apply</button>
+      </form>
+      <p class="tracking-helper">Tip: click Browse to pick a folder, then Select This Folder to start tracking.</p>
+    </section>
 
     <div id="drift-warning-banner" class="banner drift-banner is-hidden" role="status" aria-live="polite">
       <span id="drift-warning-text">⚠️ Drift increasing — context likely weakening. Review red and yellow nodes.</span>
@@ -125,13 +137,39 @@
           <button id="heal-all-red-btn" type="button" class="danger-btn">Heal All Red Nodes</button>
         </div>
       </aside>
+
+      <button id="analyze-btn" class="analyze-fab" type="button" aria-label="Analyze tracked folder now">
+        Analyze
+      </button>
+      <button id="reset-all-btn" class="reset-fab" type="button" aria-label="Reset all state and stop tracking">
+        Reset
+      </button>
     </main>
 
     <footer class="footer-strip">
-      <span id="generation-status">Generation running</span>
+      <span id="tracking-path-current" class="tracking-current">Tracking: --</span>
+      <span id="generation-status">Idle</span>
     </footer>
   </div>
 
-  <script type="module" src="./graph.js?v=20260416-9"></script>
+  <div id="folder-browser-modal" class="folder-browser-modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="folder-browser-title">
+    <div class="folder-browser-card">
+      <div class="folder-browser-header">
+        <h2 id="folder-browser-title">Choose Folder</h2>
+        <button id="folder-browser-close" class="folder-browser-close" type="button" aria-label="Close folder browser">×</button>
+      </div>
+      <div class="folder-browser-toolbar">
+        <button id="folder-browser-up" class="folder-browser-up-btn" type="button">Up</button>
+        <code id="folder-browser-current" class="folder-browser-current">--</code>
+      </div>
+      <div id="folder-browser-list" class="folder-browser-list"></div>
+      <div class="folder-browser-actions">
+        <button id="folder-browser-cancel" class="secondary-btn" type="button">Cancel</button>
+        <button id="folder-browser-select" class="track-save-btn" type="button">Select This Folder</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./graph.js?v=20260416-13"></script>
 </body>
 </html>
