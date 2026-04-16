@@ -15,10 +15,16 @@
   box-sizing: border-box;
 }
 
-html,
+html {
+  height: 100%;
+  min-height: 100vh;
+}
+
 body {
   margin: 0;
   height: 100%;
+  min-height: 100vh;
+  overflow: hidden;
 }
 
 body {
@@ -31,10 +37,10 @@ body {
 }
 
 .app-shell {
-  height: 100%;
-  display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
-  min-height: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
@@ -302,17 +308,23 @@ body {
 }
 
 .workspace {
+  flex: 1;
   min-height: 0;
   position: relative;
   overflow: hidden;
-  display: grid;
-  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 #graph-container {
-  height: 100%;
-  width: 100%;
+  flex: 1;
   min-height: 0;
+  width: 100%;
+  background:
+    radial-gradient(ellipse at 25% 35%, rgba(99, 102, 241, 0.18) 0%, transparent 55%),
+    radial-gradient(ellipse at 78% 72%, rgba(139, 92, 246, 0.12) 0%, transparent 48%),
+    radial-gradient(ellipse at 60% 10%, rgba(59, 130, 246, 0.08) 0%, transparent 40%),
+    linear-gradient(160deg, #0f172a 0%, #1e1b4b 55%, #0f0f1a 100%);
 }
 
 .node-feed {

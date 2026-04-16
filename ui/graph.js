@@ -45,6 +45,7 @@ const appState = {
   fallbackMode: false,
   hasLaidOutGraph: false,
   pollingInFlight: false,
+  virtualNodeIds: new Set(), // tracks synthesised folder node IDs
 };
 
 const dom = {
@@ -134,76 +135,94 @@ function initGraph() {
   const cy = window.cytoscape({
     container: dom.graphContainer,
     elements: [],
-    layout: { name: 'grid', fit: true, padding: 28 },
+    layout: { name: 'breadthfirst', directed: true, fit: true, padding: 44 },
     style: [
+      // ── Base file node ──────────────────────────────────────────────────
       {
         selector: 'node',
         css: {
           label: 'data(label)',
           'text-wrap': 'ellipsis',
-          'text-max-width': 130,
+          'text-max-width': 110,
           'font-size': 10,
-          color: '#ffffff',
-          'text-outline-color': '#0f172a',
-          'text-outline-width': 1,
+          'font-family': '"JetBrains Mono","Consolas",monospace',
+          color: '#f8fafc',
+          'text-outline-color': '#020617',
+          'text-outline-width': 2,
           'text-valign': 'center',
           'text-halign': 'center',
-          'background-color': '#94a3b8',
-          'border-width': 1,
-          'border-color': '#cbd5e1',
-          width: 44,
-          height: 44,
+          'background-color': '#334155',
+          'border-width': 2,
+          'border-color': '#64748b',
+          width: 68,
+          height: 68,
+          'transition-property': 'background-color, border-color, border-width, width, height',
+          'transition-duration': '300ms',
         },
       },
-      { selector: 'node[grade = "green"]', css: { 'background-color': '#22c55e' } },
-      { selector: 'node[grade = "yellow"]', css: { 'background-color': '#f59e0b' } },
-      { selector: 'node[grade = "red"]', css: { 'background-color': '#ef4444' } },
-      { selector: 'node[grade = "pending"]', css: { 'background-color': '#64748b' } },
+      // ── Virtual folder node ──────────────────────────────────────────────
+      {
+        selector: 'node[type = "folder"]',
+        css: {
+          shape: 'roundrectangle',
+          width: 160,
+          height: 48,
+          'background-color': '#1e1b4b',
+          'border-color': '#6366f1',
+          'border-width': 2,
+          'font-size': 12,
+          'font-weight': '700',
+          'text-max-width': 148,
+          'text-outline-width': 0,
+          color: '#c7d2fe',
+        },
+      },
+      // ── Grade colours ────────────────────────────────────────────────────
+      { selector: 'node[grade = "green"]',   css: { 'background-color': '#15803d', 'border-color': '#4ade80', 'border-width': 2 } },
+      { selector: 'node[grade = "yellow"]',  css: { 'background-color': '#92400e', 'border-color': '#fcd34d', 'border-width': 2 } },
+      { selector: 'node[grade = "red"]',     css: { 'background-color': '#991b1b', 'border-color': '#fca5a5', 'border-width': 2 } },
+      { selector: 'node[grade = "pending"]', css: { 'background-color': '#334155', 'border-color': '#64748b' } },
+      // ── Selection ring ───────────────────────────────────────────────────
       {
         selector: 'node:selected',
-        css: {
-          'border-color': '#0369a1',
-          'border-width': 3,
-        },
+        css: { 'border-color': '#38bdf8', 'border-width': 4 },
       },
+      // ── Real import edges ────────────────────────────────────────────────
       {
         selector: 'edge',
         css: {
-          width: 1.5,
-          'line-color': '#cbd5e1',
-          'target-arrow-color': '#cbd5e1',
+          width: 2,
+          'line-color': '#818cf8',
+          'target-arrow-color': '#818cf8',
           'target-arrow-shape': 'triangle',
           'curve-style': 'bezier',
+          opacity: 0.75,
         },
       },
+      // ── Virtual hierarchy edges (folder → child) ─────────────────────────
       {
-        selector: 'node[healStatus = "healing"]',
+        selector: 'edge[?virtual]',
         css: {
-          'border-color': '#a78bfa',
-          'border-width': 4,
-          'border-style': 'dashed',
+          width: 1.5,
+          'line-color': '#4f46e5',
+          'target-arrow-color': '#4f46e5',
+          'target-arrow-shape': 'vee',
+          'curve-style': 'taxi',
+          'taxi-direction': 'downward',
+          opacity: 0.5,
         },
       },
-      {
-        selector: 'node[healStatus = "done"]',
-        css: {
-          'border-color': '#22c55e',
-          'border-width': 2,
-        },
-      },
-      {
-        selector: 'node[healStatus = "failed"]',
-        css: {
-          'border-color': '#ef4444',
-          'border-width': 2,
-          'border-style': 'dotted',
-        },
-      },
+      // ── Heal-status rings ────────────────────────────────────────────────
+      { selector: 'node[healStatus = "healing"]', css: { 'border-color': '#a78bfa', 'border-width': 4, 'border-style': 'dashed' } },
+      { selector: 'node[healStatus = "done"]',    css: { 'border-color': '#4ade80', 'border-width': 2 } },
+      { selector: 'node[healStatus = "failed"]',  css: { 'border-color': '#f87171', 'border-width': 2, 'border-style': 'dotted' } },
     ],
   });
 
   cy.on('tap', 'node', (event) => {
     const nodeId = event.target.id();
+    // Virtual folder nodes don't have panel data – clicking them does nothing
+    if (String(nodeId).startsWith('__dir__')) return;
     appState.selectedNodeId = nodeId;
     const node = appState.nodes.get(nodeId) || null;
     panelController.setNode(node);
@@ -434,6 +453,13 @@ function applyFullReset(rawState) {
     elements.push({ group: 'edges', data: edge });
   });
 
+  // Synthesise virtual folder nodes + hierarchy edges so the graph always
+  // shows a parent→child tree even when there are no real import edges.
+  const { virtualNodes, virtualEdges } = buildVirtualHierarchy(Array.from(appState.nodes.values()));
+  appState.virtualNodeIds = new Set(virtualNodes.map((n) => n.id));
+  virtualNodes.forEach((vn) => elements.push({ group: 'nodes', data: vn }));
+  virtualEdges.forEach((ve) => elements.push({ group: 'edges', data: ve }));
+
   if (appState.cy && elements.length > 0) {
     try {
       appState.cy.add(elements);
@@ -547,7 +573,25 @@ function applyGraphUpdate(payload) {
     setDriftScoreBadge(parsed.driftScore);
   }
 
-  if (appState.cy && addedElements > 0) {
+  // Rebuild virtual folder hierarchy whenever the node set changes
+  if (appState.cy && (addedElements > 0 || parsed.removedNodeIds.length > 0)) {
+    // Remove stale virtual nodes first
+    appState.virtualNodeIds.forEach((vid) => {
+      const el = appState.cy.getElementById(vid);
+      if (el.length) el.remove();
+    });
+    // Remove stale virtual edges
+    appState.cy.edges('[?virtual]').remove();
+    // Re-inject
+    const { virtualNodes, virtualEdges } = buildVirtualHierarchy(Array.from(appState.nodes.values()));
+    appState.virtualNodeIds = new Set(virtualNodes.map((n) => n.id));
+    const vEls = [
+      ...virtualNodes.map((vn) => ({ group: 'nodes', data: vn })),
+      ...virtualEdges.map((ve) => ({ group: 'edges', data: ve })),
+    ];
+    if (vEls.length > 0) {
+      try { appState.cy.add(vEls); } catch (_) {}
+    }
     runLayout(appState.hasLaidOutGraph);
     appState.hasLaidOutGraph = true;
   }
@@ -700,12 +744,19 @@ function refreshSelectedNode() {
 
 function runLayout(animate) {
   if (!appState.cy || appState.cy.nodes().length === 0) return;
+  // Root nodes = those with no incoming edges (top of the tree)
+  const roots = appState.cy.nodes().filter((n) => n.indegree() === 0);
   appState.cy.layout({
-    name: 'cose',
+    name: 'breadthfirst',
+    directed: true,
     fit: true,
     animate: Boolean(animate),
-    padding: 34,
-    randomize: !appState.hasLaidOutGraph,
+    animationDuration: 500,
+    animationEasing: 'ease-out-expo',
+    padding: 52,
+    spacingFactor: 1.65,
+    avoidOverlap: true,
+    roots: roots.length > 0 ? roots : undefined,
   }).run();
 }
 
@@ -760,6 +811,65 @@ function looksLikeEdge(obj) {
 
 function looksLikeNode(obj) {
   return Boolean(obj && typeof obj === 'object' && (obj.id || obj.nodeId));
+}
+
+/**
+ * Synthesise folder nodes + directed edges from file paths so the graph
+ * renders as a directory tree even when there are no real import edges.
+ * Folder node IDs are prefixed with `__dir__` to distinguish them.
+ */
+function buildVirtualHierarchy(nodeList) {
+  const virtualNodes = [];
+  const virtualEdges = [];
+  const folderSeen = new Set();
+  const edgeSeen = new Set();
+
+  for (const node of nodeList) {
+    const rawId = String(node.id || '');
+    // Skip virtual nodes themselves
+    if (rawId.startsWith('__dir__')) continue;
+
+    const parts = rawId.split('/').filter(Boolean);
+    if (parts.length < 2) continue; // root-level file – no folder parent to synthesise
+
+    // Walk every directory depth, creating folder nodes as needed
+    for (let depth = 1; depth < parts.length; depth++) {
+      const folderPath = parts.slice(0, depth).join('/');
+      const folderId   = `__dir__${folderPath}`;
+
+      if (!folderSeen.has(folderId)) {
+        folderSeen.add(folderId);
+        virtualNodes.push({
+          id:    folderId,
+          label: parts[depth - 1],   // just the directory name
+          type:  'folder',
+          grade: 'folder',
+        });
+
+        // Connect this folder to its parent folder
+        if (depth > 1) {
+          const parentPath = parts.slice(0, depth - 1).join('/');
+          const parentId   = `__dir__${parentPath}`;
+          const eid        = `${parentId}->${folderId}`;
+          if (!edgeSeen.has(eid)) {
+            edgeSeen.add(eid);
+            virtualEdges.push({ id: eid, source: parentId, target: folderId, virtual: true });
+          }
+        }
+      }
+    }
+
+    // Connect the file node to its immediate parent folder
+    const parentPath = parts.slice(0, -1).join('/');
+    const parentId   = `__dir__${parentPath}`;
+    const eid        = `${parentId}->${rawId}`;
+    if (!edgeSeen.has(eid)) {
+      edgeSeen.add(eid);
+      virtualEdges.push({ id: eid, source: parentId, target: rawId, virtual: true });
+    }
+  }
+
+  return { virtualNodes, virtualEdges };
 }
 
 function inferNodeLabel(id) {
