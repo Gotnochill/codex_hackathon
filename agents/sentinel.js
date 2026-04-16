@@ -161,6 +161,24 @@ function scoreState() {
 
     const nodes = Array.isArray(state.nodes) ? state.nodes : [];
 
+    // If the reference prompt is blank there is nothing to compare against —
+    // skip scoring and leave every node as "pending" rather than grading 0→red.
+    if (!prompt) {
+      let changed = false;
+      for (const node of nodes) {
+        if (node.grade !== 'pending' || node.score !== null) {
+          node.grade = 'pending';
+          node.score = null;
+          changed = true;
+        }
+      }
+      if (changed) {
+        state.lastUpdated = new Date().toISOString();
+        atomicWriteJson(STATE_PATH, state);
+      }
+      return;
+    }
+
     const candidates = nodes.filter((node) => {
       if (!node || typeof node.id !== 'string') return false;
       if (isBeingHealed(node.id, queue)) return false;
